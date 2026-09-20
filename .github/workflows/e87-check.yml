@@ -18,15 +18,19 @@ jobs:
         run: |
           set +e
           UA="Mozilla/5.0 (Linux; Android 6.0.1; Nexus 5X Build/MMB29P) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0 Mobile Safari/537.36 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
+          ACC="text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
           IP=$(curl -s https://ipinfo.io/ip)
           echo "== job ${{ matrix.n }}  egress_ip=$IP  $(TZ=Asia/Tokyo date '+%H:%M:%S JST')"
-          for v in "--http2" "--http1.1"; do
-            for u in "https://www.e87.com/selection/agedday/" "https://www.e87.com/selection/ohigan/"; do
-              out=$(curl -sIL --max-redirs 10 $v -A "$UA" "$u")
+          for mode in "plain" "browserlike"; do
+            if [ "$mode" = "plain" ]; then EXTRA=""; else EXTRA="--compressed -H Accept:$ACC -H Accept-Language:ja,en;q=0.8"; fi
+            for u in "https://www.e87.com/selection/agedday/" "https://www.e87.com/selection/ohigan/" "https://www.e87.com/s/selection/agedday/"; do
+              out=$(curl -sIL --max-redirs 10 $EXTRA -A "$UA" "$u")
               rc=$?
               chain=$(echo "$out" | grep -iE "^HTTP|^location" | tr -d '\r' | awk '{print $2}' | paste -sd' ')
+              xcache=$(echo "$out" | grep -i "^x-cache" | tr -d '\r' | awk -F': ' '{print $2}' | paste -sd'|')
               node=$(echo "$out" | grep -io "LBSessionCookie=[^;]*" | head -1 | grep -o "o[0-9]*$")
               pop=$(echo "$out"  | grep -i "^x-amz-cf-pop" | head -1 | awk '{print $2}' | tr -d '\r')
-              echo "ip=$IP ver=$v url=$u rc=$rc node=${node:-none} pop=$pop chain=[$chain]"
+              echo "ip=$IP mode=$mode url=$u rc=$rc node=${node:-none} pop=$pop xcache=[$xcache] chain=[$chain]"
+              if [ "$rc" = "47" ]; then echo "----- RAW (loop) -----"; echo "$out" | grep -iE "^HTTP|^location|^x-cache|^set-cookie|^date"; echo "----------------------"; fi
             done
           done
