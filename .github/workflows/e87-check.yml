@@ -1,0 +1,66 @@
+name: e87 redirect check (US runner)
+
+on:
+  workflow_dispatch:        # 手動実行
+  schedule:
+    - cron: '0 * * * *'     # 毎時0分（UTC）。監視不要なら行ごと削除
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Runner location
+        run: |
+          echo "== date (JST) =="; TZ=Asia/Tokyo date
+          echo "== egress IP / geo =="; curl -s https://ipinfo.io/json || true
+
+      - name: Googlebot smartphone UA - 3 URLs x 3 tries
+        shell: bash
+        run: |
+          set +e
+          UA="Mozilla/5.0 (Linux; Android 6.0.1; Nexus 5X Build/MMB29P) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0 Mobile Safari/537.36 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
+          for u in \
+            "https://www.e87.com/selection/agedday/" \
+            "https://www.e87.com/selection/ohigan/" \
+            "https://www.e87.com/s/selection/agedday/" \
+            "https://www.e87.com/selection/agedday"; do
+            echo "=================== $u"
+            for i in 1 2 3; do
+              echo "--- try $i"
+              curl -sIL --max-redirs 10 -A "$UA" "$u" \
+                | grep -iE "^HTTP|^Location|^Set-Cookie|^X-Cache|^X-Amz-Cf-Pop|^Date"
+              rc=${PIPESTATUS[0]}
+              echo "curl exit code: $rc  (47 = redirect loop / max redirs exceeded)"
+            done
+          done
+
+      - name: Desktop Chrome UA
+        shell: bash
+        run: |
+          set +e
+          UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36"
+          for u in "https://www.e87.com/selection/agedday/" "https://www.e87.com/s/selection/agedday/"; do
+            echo "=================== $u"
+            curl -sIL --max-redirs 10 -A "$UA" "$u" \
+              | grep -iE "^HTTP|^Location|^Set-Cookie|^X-Cache|^X-Amz-Cf-Pop|^Date"
+            echo "curl exit code: ${PIPESTATUS[0]}"
+          done
+
+      - name: Full raw headers+body of PC dir URL (evidence)
+        shell: bash
+        run: |
+          set +e
+          UA="Mozilla/5.0 (Linux; Android 6.0.1; Nexus 5X Build/MMB29P) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0 Mobile Safari/537.36 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
+          mkdir -p out
+          curl -sL --max-redirs 10 -A "$UA" -D out/headers.txt -o out/body.html \
+            -w "final_url=%{url_effective}\nnum_redirects=%{num_redirects}\nhttp_code=%{http_code}\n" \
+            "https://www.e87.com/selection/agedday/" > out/summary.txt
+          echo "curl exit code: $?" >> out/summary.txt
+          cat out/summary.txt
+          echo "----- headers -----"; cat out/headers.txt
+
+      - name: Upload evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: e87-evidence-${{ github.run_id }}
+          path: out/
