@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 350
     steps:
-      - name: poll every 10 min for ~5.5h
+      - name: poll every 10 min for ~5.5h (GET)
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -29,27 +29,29 @@ jobs:
           UA="Mozilla/5.0 (Linux; Android 6.0.1; Nexus 5X Build/MMB29P) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0 Mobile Safari/537.36 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
           ACC="text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
           IP=$(curl -s https://ipinfo.io/ip)
-          echo "== runner egress_ip=$IP start $(TZ=Asia/Tokyo date '+%Y-%m-%d %H:%M:%S JST')"
-          URLS="https://www.e87.com/selection/agedday/ https://www.e87.com/selection/ohigan/ https://www.e87.com/s/selection/agedday/ https://img.e87.com/selection/agedday https://img.e87.com/selection/ohigan"
+          echo "== runner egress_ip=$IP start $(date -u '+%Y-%m-%dT%H:%M:%SZ') / $(TZ=Asia/Tokyo date '+%Y-%m-%d %H:%M:%S JST')"
+          URLS="https://www.e87.com/selection/agedday/ https://www.e87.com/selection/ohigan/ https://www.e87.com/s/selection/agedday/ https://www.e87.com/selection/agedday https://img.e87.com/selection/agedday https://img.e87.com/selection/ohigan"
           for i in $(seq 1 33); do
-            TS=$(TZ=Asia/Tokyo date '+%Y-%m-%d %H:%M:%S JST')
-            echo "===== round $i  $TS"
+            TS=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+            TSJ=$(TZ=Asia/Tokyo date '+%H:%M:%S')
+            echo "===== round $i  $TS ($TSJ JST)"
             for mode in plain browserlike; do
               if [ "$mode" = "plain" ]; then EXTRA=""; else EXTRA="--compressed -H Accept:$ACC -H Accept-Language:ja,en;q=0.8"; fi
               for u in $URLS; do
-                out=$(curl -sIL --max-redirs 10 $EXTRA -A "$UA" "$u")
+                out=$(curl -sL --max-redirs 10 --connect-timeout 10 --max-time 60 -o /dev/null -D - $EXTRA -A "$UA" "$u")
                 rc=$?
                 chain=$(echo "$out" | grep -iE "^HTTP|^location" | tr -d '\r' | awk '{print $2}' | paste -sd' ')
                 xcache=$(echo "$out" | grep -i "^x-cache" | tr -d '\r' | awk -F': ' '{print $2}' | paste -sd'|')
+                cfid=$(echo "$out" | grep -i "^x-amz-cf-id" | tr -d '\r' | awk '{print $2}' | paste -sd'|')
                 pop=$(echo "$out" | grep -i "^x-amz-cf-pop" | head -1 | awk '{print $2}' | tr -d '\r')
-                echo "$TS ip=$IP mode=$mode url=$u rc=$rc pop=$pop xcache=[$xcache] chain=[$chain]"
+                echo "$TS ip=$IP mode=$mode url=$u rc=$rc pop=$pop xcache=[$xcache] chain=[$chain] cfid=[$cfid]"
                 ANOM=0
                 [ "$rc" = "47" ] && ANOM=1
                 case "$u" in https://www.e87.com/*) echo "$chain" | grep -q "org.e87.com" && ANOM=1 ;; esac
                 if [ "$ANOM" = "1" ]; then
-                  RAW=$(echo "$out" | grep -iE "^HTTP|^location|^x-cache|^x-amz-cf-pop|^set-cookie|^date" | tr -d '\r')
+                  RAW=$(echo "$out" | grep -iE "^HTTP|^location|^x-cache|^x-amz-cf-pop|^x-amz-cf-id|^set-cookie|^date|^age" | tr -d '\r')
                   echo "----- ANOMALY -----"; echo "$RAW"; echo "-------------------"
-                  BODY=$(printf 'time: %s\nsource_ip: %s\npop: %s\nmode: %s\nurl: %s\ncurl_exit: %s\nchain: %s\n\n```\n%s\n```\nrun: %s/%s/actions/runs/%s' "$TS" "$IP" "$pop" "$mode" "$u" "$rc" "$chain" "$RAW" "$GITHUB_SERVER_URL" "$GH_REPO" "$GITHUB_RUN_ID")
+                  BODY=$(printf 'time_utc: %s\ntime_jst: %s\nsource_ip: %s\npop: %s\nmode: %s\nmethod: GET\nurl: %s\ncurl_exit: %s\nchain: %s\ncf_ids: %s\n\n```\n%s\n```\nrun: %s/%s/actions/runs/%s' "$TS" "$TSJ" "$IP" "$pop" "$mode" "$u" "$rc" "$chain" "$cfid" "$RAW" "$GITHUB_SERVER_URL" "$GH_REPO" "$GITHUB_RUN_ID")
                   gh issue create --title "[e87] anomaly $TS rc=$rc $u" --body "$BODY"
                 fi
               done
