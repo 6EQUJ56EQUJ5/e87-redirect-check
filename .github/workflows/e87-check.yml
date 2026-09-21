@@ -54,8 +54,9 @@ jobs:
                 fi
               done
             done
-            [ "$i" -lt 33 ] && sleep 600
+            if [ "$i" -lt 33 ]; then sleep 600; fi
           done
+          echo "poll finished normally"
 
       - name: re-dispatch next run
         if: success()
