@@ -19,46 +19,118 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 350
     steps:
-      - name: poll every 10 min for ~5.5h (GET)
+      - name: poll every 10 min for ~5.5h (python GET, no HSTS)
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set +e
-          UA="Mozilla/5.0 (Linux; Android 6.0.1; Nexus 5X Build/MMB29P) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0 Mobile Safari/537.36 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
-          ACC="text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-          IP=$(curl -s https://ipinfo.io/ip)
-          echo "== runner egress_ip=$IP start $(date -u '+%Y-%m-%dT%H:%M:%SZ') / $(TZ=Asia/Tokyo date '+%Y-%m-%d %H:%M:%S JST')"
-          URLS="https://www.e87.com/selection/agedday/ https://www.e87.com/selection/ohigan/ https://www.e87.com/s/selection/agedday/ https://www.e87.com/selection/agedday https://img.e87.com/selection/agedday https://img.e87.com/selection/ohigan"
-          for i in $(seq 1 33); do
-            TS=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
-            TSJ=$(TZ=Asia/Tokyo date '+%H:%M:%S')
-            echo "===== round $i  $TS ($TSJ JST)"
-            for mode in plain browserlike; do
-              if [ "$mode" = "plain" ]; then EXTRA=""; else EXTRA="--compressed -H Accept:$ACC -H Accept-Language:ja,en;q=0.8"; fi
-              for u in $URLS; do
-                out=$(curl -sL --max-redirs 10 --connect-timeout 10 --max-time 60 -o /dev/null -D - $EXTRA -A "$UA" "$u")
-                rc=$?
-                chain=$(echo "$out" | grep -iE "^HTTP|^location" | tr -d '\r' | awk '{print $2}' | paste -sd' ')
-                xcache=$(echo "$out" | grep -i "^x-cache" | tr -d '\r' | awk -F': ' '{print $2}' | paste -sd'|')
-                cfid=$(echo "$out" | grep -i "^x-amz-cf-id" | tr -d '\r' | awk '{print $2}' | paste -sd'|')
-                pop=$(echo "$out" | grep -i "^x-amz-cf-pop" | head -1 | awk '{print $2}' | tr -d '\r')
-                echo "$TS ip=$IP mode=$mode url=$u rc=$rc pop=$pop xcache=[$xcache] chain=[$chain] cfid=[$cfid]"
-                ANOM=0
-                [ "$rc" = "47" ] && ANOM=1
-                case "$u" in https://www.e87.com/*) echo "$chain" | grep -q "org.e87.com" && ANOM=1 ;; esac
-                if [ "$ANOM" = "1" ]; then
-                  RAW=$(echo "$out" | grep -iE "^HTTP|^location|^x-cache|^x-amz-cf-pop|^x-amz-cf-id|^set-cookie|^date|^age" | tr -d '\r')
-                  echo "----- ANOMALY -----"; echo "$RAW"; echo "-------------------"
-                  BODY=$(printf 'time_utc: %s\ntime_jst: %s\nsource_ip: %s\npop: %s\nmode: %s\nmethod: GET\nurl: %s\ncurl_exit: %s\nchain: %s\ncf_ids: %s\n\n```\n%s\n```\nrun: %s/%s/actions/runs/%s' "$TS" "$TSJ" "$IP" "$pop" "$mode" "$u" "$rc" "$chain" "$cfid" "$RAW" "$GITHUB_SERVER_URL" "$GH_REPO" "$GITHUB_RUN_ID")
-                  gh issue create --title "[e87] anomaly $TS rc=$rc $u" --body "$BODY"
-                fi
-              done
-            done
-            if [ "$i" -lt 33 ]; then sleep 600; fi
-          done
-          echo "poll finished normally"
+          python3 - <<'PY'
+          import http.client, ssl, os, subprocess, time, datetime, urllib.request
+          from urllib.parse import urlsplit, urljoin
+          UA = "Mozilla/5.0 (Linux; Android 6.0.1; Nexus 5X Build/MMB29P) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0 Mobile Safari/537.36 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
+          MODES = {
+            "plain": {"Accept": "*/*"},
+            "browserlike": {"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", "Accept-Encoding": "gzip, deflate, br", "Accept-Language": "ja,en;q=0.8"},
+          }
+          URLS = [
+            "https://www.e87.com/selection/agedday/",
+            "https://www.e87.com/selection/ohigan/",
+            "https://www.e87.com/s/selection/agedday/",
+            "https://www.e87.com/selection/agedday",
+            "https://img.e87.com/selection/agedday",
+            "https://img.e87.com/selection/ohigan",
+          ]
+          try:
+            IP = urllib.request.urlopen("https://ipinfo.io/ip", timeout=10).read().decode().strip()
+          except Exception as e:
+            IP = "unknown"
+          def now():
+            return datetime.datetime.now(datetime.timezone.utc)
+          def fetch(url, extra):
+            u = urlsplit(url)
+            host = u.hostname
+            path = u.path or "/"
+            if u.query:
+              path += "?" + u.query
+            if u.scheme == "https":
+              conn = http.client.HTTPSConnection(host, timeout=20, context=ssl.create_default_context())
+            else:
+              conn = http.client.HTTPConnection(host, timeout=20)
+            hdrs = {"Host": host, "User-Agent": UA}
+            hdrs.update(extra)
+            conn.request("GET", path, headers=hdrs)
+            r = conn.getresponse()
+            r.read()
+            out = r.getheaders()
+            conn.close()
+            return r.status, out
+          def chain(start, extra):
+            hops = []
+            url = start
+            seen = set()
+            for i in range(12):
+              try:
+                st, h = fetch(url, extra)
+              except Exception as e:
+                hops.append({"url": url, "error": str(e)})
+                return hops, "error"
+              d = {}
+              for k, v in h:
+                d[k.lower()] = v
+              hops.append({"url": url, "status": st, "location": d.get("location"), "xcache": d.get("x-cache"), "pop": d.get("x-amz-cf-pop"), "cfid": d.get("x-amz-cf-id"), "cookie": (d.get("set-cookie") or "")[:70], "date": d.get("date"), "age": d.get("age")})
+              loc = d.get("location")
+              if st in (301, 302, 303, 307, 308) and loc:
+                nxt = urljoin(url, loc)
+                seen.add(url)
+                if nxt in seen or len(hops) >= 11:
+                  hops.append({"url": nxt, "note": "LOOP/limit"})
+                  return hops, "loop"
+                url = nxt
+                continue
+              return hops, "ok"
+            return hops, "loop"
+          def fmt(hops):
+            parts = []
+            for h in hops:
+              if "error" in h:
+                parts.append("ERR(" + h["error"][:40] + ")")
+              elif "note" in h:
+                parts.append("-> " + h["url"] + " " + h["note"])
+              else:
+                parts.append(str(h["status"]) + " " + h["url"])
+            return " | ".join(parts)
+          print("== runner egress_ip=" + IP + " start " + now().strftime("%Y-%m-%dT%H:%M:%SZ"), flush=True)
+          for rnd in range(1, 34):
+            ts = now().strftime("%Y-%m-%dT%H:%M:%SZ")
+            tsj = (now() + datetime.timedelta(hours=9)).strftime("%H:%M:%S")
+            print("===== round " + str(rnd) + "  " + ts + " (" + tsj + " JST)", flush=True)
+            for mode, extra in MODES.items():
+              for u in URLS:
+                hops, res = chain(u, extra)
+                pops = ",".join(sorted(set(h.get("pop") or "" for h in hops if h.get("pop"))))
+                xc = "|".join((h.get("xcache") or "-").replace(" from cloudfront", "") for h in hops if "status" in h)
+                cf = "|".join(h.get("cfid") or "-" for h in hops if "status" in h)
+                print(ts + " ip=" + IP + " mode=" + mode + " url=" + u + " result=" + res + " pop=" + pops + " xcache=[" + xc + "] chain=[" + fmt(hops) + "] cfid=[" + cf + "]", flush=True)
+                anom = (res == "loop")
+                if u.startswith("https://www.e87.com/") and any("org.e87.com" in (h.get("url") or "") for h in hops):
+                  anom = True
+                if anom:
+                  raw = []
+                  for h in hops:
+                    raw.append(str(h))
+                  fence = chr(96) * 3
+                  body = "time_utc: " + ts + chr(10) + "time_jst: " + tsj + chr(10) + "source_ip: " + IP + chr(10) + "mode: " + mode + chr(10) + "method: GET (python, no HSTS)" + chr(10) + "url: " + u + chr(10) + "result: " + res + chr(10) + "chain: " + fmt(hops) + chr(10) + chr(10) + fence + chr(10) + chr(10).join(raw) + chr(10) + fence + chr(10) + "run: " + os.environ.get("RUN_URL", "")
+                  print("----- ANOMALY -----" + chr(10) + body + chr(10) + "-------------------", flush=True)
+                  subprocess.run(["gh", "issue", "create", "--title", "[e87] anomaly " + ts + " " + res + " " + u, "--body", body])
+            if rnd < 33:
+              time.sleep(600)
+          print("poll finished normally")
+          PY
+          echo "python exit=$?"
+          true
 
       - name: re-dispatch next run
         if: success()
